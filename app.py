@@ -5,10 +5,6 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 
-# ============================================================
-# PAGE CONFIG
-# ============================================================
-
 st.set_page_config(
     page_title="Hand-Drawn Character Animator",
     page_icon="🎨",
@@ -17,26 +13,14 @@ st.set_page_config(
 )
 
 st.title("🎨 Hand-Drawn Character Animator")
-st.markdown(
-    """
-Upload a hand-drawn character and mark the parts you want to animate
-using colored areas. The program anchors the joints to the body outlines
-and generates attached, organic animations without AI.
-"""
-)
+st.markdown("Upload your drawing. Marked colored areas are anchored to the body without tearing or detaching.")
 
-
-# ============================================================
-# COLOR UTILITIES
-# ============================================================
 
 def get_color_name(rgb):
-    """Convert RGB color into a human-readable name."""
     r, g, b = rgb
     pixel = np.uint8([[[b, g, r]]])
-    hsv_pixel = cv2.cvtColor(pixel, cv2.COLOR_BGR2HSV)[0][0]
-    hue = int(hsv_pixel[0])
-    sat = int(hsv_pixel[1])
+    hsv = cv2.cvtColor(pixel, cv2.COLOR_BGR2HSV)[0][0]
+    hue, sat = int(hsv[0]), int(hsv[1])
 
     if sat < 35:
         return "Neutral"
@@ -57,33 +41,19 @@ def get_color_name(rgb):
     return "Accent"
 
 
-def resize_for_processing(image, max_dimension=1200):
-    """Resize only if image is unnecessarily large to preserve performance."""
-    h, w = image.shape[:2]
-    largest = max(h, w)
-    if largest <= max_dimension:
-        return image
-    scale = max_dimension / largest
-    return cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-
-
-# ============================================================
-# DOMINANT COLORS
-# ============================================================
-
-def extract_dominant_colors(image, num_clusters=7):
+def extract_dominant_colors(image, num_clusters=5):
     try:
-        small = cv2.resize(image, (180, 180), interpolation=cv2.INTER_AREA)
+        small = cv2.resize(image, (120, 120), interpolation=cv2.INTER_AREA)
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        valid = (gray > 45) & (gray < 240)
-        pixels = small[valid].astype(np.float32)
+        valid = (gray > 45) & (gray < 235)
+        pixels = small[valid].reshape(-1, 3).astype(np.float32)
 
-        if len(pixels) < 100:
+        if len(pixels) < 50:
             return []
 
-        k = min(num_clusters, max(2, len(pixels) // 50))
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
-        _, labels, centers = cv2.kmeans(pixels, k, None, criteria, 4, cv2.KMEANS_PP_CENTERS)
+        k = min(num_clusters, max(1, len(pixels) // 20))
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 15, 1.0)
+        _, labels, centers = cv2.kmeans(pixels, k, None, criteria, 3, cv2.KMEANS_PP_CENTERS)
 
         counts = np.bincount(labels.flatten(), minlength=k)
         total = max(1, int(np.sum(counts)))
@@ -92,110 +62,68 @@ def extract_dominant_colors(image, num_clusters=7):
         for idx, center in enumerate(centers):
             b, g, r = [int(np.clip(x, 0, 255)) for x in center]
             coverage = (counts[idx] / total) * 100
-            if coverage < 1.0:
+            if coverage < 1.5:
                 continue
 
             hsv = cv2.cvtColor(np.uint8([[[b, g, r]]]), cv2.COLOR_BGR2HSV)[0][0]
-            h_val, s_val, v_val = int(hsv[0]), int(hsv[1]), int(hsv[2])
-
-            if s_val < 30:
+            if int(hsv[1]) < 30:
                 continue
 
             hex_code = f"#{r:02x}{g:02x}{b:02x}"
             detected.append({
                 "label": f"{get_color_name((r, g, b))} ({hex_code}) {coverage:.1f}%",
-                "hsv": (h_val, s_val, v_val),
+                "hsv": (int(hsv[0]), int(hsv[1]), int(hsv[2])),
                 "hex": hex_code,
-                "coverage": coverage,
             })
 
-        detected.sort(key=lambda x: x["coverage"], reverse=True)
         return detected
     except Exception:
         return []
 
 
-# ============================================================
-# PART DETECTION & RIGGING
-# ============================================================
-
-def build_color_mask(image, chosen_colors):
+def detect_parts_safe(image, chosen_colors):
+    h, w = image.shape[:2]
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    combined = np.zeros(hsv.shape[:2], dtype=np.uint8)
+    combined = np.zeros((h, w), dtype=np.uint8)
 
     for color in chosen_colors:
         h_val, s_val, v_val = color["hsv"]
-        h_low = h_val - 15
-        h_high = h_val + 15
-
-        if h_low < 0:
-            m1 = cv2.inRange(hsv, np.array([0, max(25, s_val - 80), max(25, v_val - 80)]), np.array([h_high, 255, 255]))
-            m2 = cv2.inRange(hsv, np.array([180 + h_low, max(25, s_val - 80), max(25, v_val - 80)]), np.array([179, 255, 255]))
-            mask = cv2.bitwise_or(m1, m2)
-        elif h_high > 179:
-            m1 = cv2.inRange(hsv, np.array([h_low, max(25, s_val - 80), max(25, v_val - 80)]), np.array([179, 255, 255]))
-            m2 = cv2.inRange(hsv, np.array([0, max(25, s_val - 80), max(25, v_val - 80)]), np.array([h_high - 180, 255, 255]))
-            mask = cv2.bitwise_or(m1, m2)
-        else:
-            mask = cv2.inRange(
-                hsv,
-                np.array([max(0, h_low), max(25, s_val - 80), max(25, v_val - 80)]),
-                np.array([min(179, h_high), 255, 255]),
-            )
+        lower = np.array([max(0, h_val - 16), max(25, s_val - 70), max(25, v_val - 70)])
+        upper = np.array([min(179, h_val + 16), 255, 255])
+        mask = cv2.inRange(hsv, lower, upper)
         combined = cv2.bitwise_or(combined, mask)
 
-    return combined
+    clean_mask = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(clean_mask, connectivity=8)
 
-
-def detect_parts(image, chosen_colors):
-    h, w = image.shape[:2]
-    color_mask = build_color_mask(image, chosen_colors)
-
-    mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
-
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     parts = []
-    minimum_area = max(80, int(h * w * 0.00015))
+    min_area = max(60, int(h * w * 0.0001))
 
     for i in range(1, num_labels):
         area = stats[i, cv2.CC_STAT_AREA]
-        if area < minimum_area:
+        if area < min_area:
             continue
 
-        component = (labels == i).astype(np.uint8) * 255
-        ys, xs = np.where(component > 0)
-        if len(xs) < 20:
+        comp = (labels == i).astype(np.uint8) * 255
+        ys, xs = np.where(comp > 0)
+        if len(xs) < 15:
             continue
 
-        points = np.column_stack((xs, ys)).astype(np.float32)
-        mean, eigenvectors = cv2.PCACompute(points, mean=None)
-        center = mean[0]
-        axis = eigenvectors[0]
+        # Safe Joint Detection using Min/Max Bounds
+        base_y = float(np.max(ys))
+        base_x = float(np.mean(xs[ys == int(base_y)]))
 
-        distances = np.dot(points - center, axis)
-        min_point = points[np.argmin(distances)]
-        max_point = points[np.argmax(distances)]
+        tip_y = float(np.min(ys))
+        tip_x = float(np.mean(xs[ys == int(tip_y)]))
 
-        # Base is closer to image center (torso/skull attachment point)
-        image_center = np.array([w / 2.0, h / 2.0], dtype=np.float32)
-        if np.linalg.norm(min_point - image_center) < np.linalg.norm(max_point - image_center):
-            base, tip = min_point, max_point
-        else:
-            base, tip = max_point, min_point
-
-        length = float(np.linalg.norm(tip - base))
-        if length < 15:
-            continue
-
-        # Smooth expanded part mask
-        expanded = cv2.dilate(component, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=1)
+        length = max(10.0, float(math.hypot(tip_x - base_x, tip_y - base_y)))
+        expanded = cv2.dilate(comp, np.ones((5, 5), np.uint8), iterations=1)
 
         parts.append({
-            "full_mask": expanded > 0,
-            "base": (float(base[0]), float(base[1])),
-            "tip": (float(tip[0]), float(tip[1])),
-            "center": (float(center[0]), float(center[1])),
+            "mask": expanded > 0,
+            "base": (base_x, base_y),
+            "tip": (tip_x, tip_y),
+            "center": (float(np.mean(xs)), float(np.mean(ys))),
             "length": length,
             "area": int(area),
         })
@@ -204,15 +132,7 @@ def detect_parts(image, chosen_colors):
     return parts
 
 
-# ============================================================
-# SEAMLESS ELASTIC ANIMATION ENGINE (ZERO DETACHING)
-# ============================================================
-
-def animate_frame_elastic(original, parts, motion, frame_index, total_frames, intensity, smoothness=1.0):
-    """
-    Applies continuous mesh deformation: base joint has zero displacement
-    (strictly attached to body), tip has maximum movement.
-    """
+def animate_frame_elastic(original, parts, motion, frame_index, total_frames, intensity):
     h, w = original.shape[:2]
     grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
     map_x = grid_x.astype(np.float32)
@@ -220,126 +140,98 @@ def animate_frame_elastic(original, parts, motion, frame_index, total_frames, in
 
     phase = 2.0 * math.pi * frame_index / total_frames
     sine = math.sin(phase)
-    sine2 = math.sin(phase * 2.0 + math.pi / 4.0)
 
     for idx, part in enumerate(parts):
-        mask = part["full_mask"]
+        mask = part["mask"]
         bx, by = part["base"]
         length = part["length"]
 
-        # Calculate weight: 0 at base, 1 at tip
         dist = np.sqrt((grid_x - bx) ** 2 + (grid_y - by) ** 2)
-        vert_weight = np.clip(dist / length, 0.0, 1.0)
-        weight = np.power(vert_weight, 1.5) * smoothness
-
-        direction = 1.0 if idx % 2 == 0 else -1.0
+        weight = np.power(np.clip(dist / length, 0.0, 1.0), 1.5)
+        dir_mult = 1.0 if idx % 2 == 0 else -1.0
 
         if motion == "Sway":
-            dx = sine * intensity * 0.8 * direction * weight
-            dy = sine2 * intensity * 0.2 * weight
+            dx = sine * intensity * dir_mult * weight
             map_x[mask] -= dx[mask]
-            map_y[mask] -= dy[mask]
-
         elif motion == "Bounce":
-            dy = sine * intensity * 0.6 * weight
+            dy = sine * (intensity * 0.7) * weight
             map_y[mask] -= dy[mask]
-
         elif motion == "Wave":
-            dx = sine * intensity * 1.5 * direction * weight
-            dy = (1.0 - abs(sine)) * intensity * 0.4 * weight
+            dx = sine * (intensity * 1.4) * dir_mult * weight
+            dy = (1.0 - abs(sine)) * (intensity * 0.4) * weight
             map_x[mask] -= dx[mask]
             map_y[mask] -= dy[mask]
 
-        elif motion == "Walk":
-            dx = sine * intensity * 1.2 * direction * weight
-            dy = sine2 * intensity * 0.4 * weight
-            map_x[mask] -= dx[mask]
-            map_y[mask] -= dy[mask]
-
-        elif motion == "Wiggle":
-            dx = sine * intensity * 0.7 * direction * weight
-            map_x[mask] -= dx[mask]
-
-    warped = cv2.remap(original, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-    return warped
+    return cv2.remap(original, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
 
 
-def generate_animation_frames(original, parts, motion="Sway", intensity=12, frame_count=16, smoothness=1.0):
-    frames = []
-    for i in range(frame_count):
-        frame = animate_frame_elastic(original, parts, motion, i, frame_count, intensity, smoothness)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frames.append(Image.fromarray(rgb))
-    return frames
-
-
-# ============================================================
-# EXPORTERS
-# ============================================================
-
-def build_gif_bytes(frames, duration=60, loop=0):
-    if not frames:
-        return b""
-    buffer = io.BytesIO()
+def build_gif(frames, duration=60):
+    buf = io.BytesIO()
     prepared = [f.convert("P", palette=Image.ADAPTIVE) for f in frames]
-    prepared[0].save(
-        buffer,
-        format="GIF",
-        save_all=True,
-        append_images=prepared[1:],
-        duration=duration,
-        loop=loop,
-        optimize=True,
-    )
-    return buffer.getvalue()
+    prepared[0].save(buf, format="GIF", save_all=True, append_images=prepared[1:], duration=duration, loop=0)
+    return buf.getvalue()
 
 
-def create_rig_preview(image, parts):
-    preview = image.copy()
-    for idx, part in enumerate(parts):
-        bx, by = int(part["base"][0]), int(part["base"][1])
-        tx, ty = int(part["tip"][0]), int(part["tip"][1])
-        cx, cy = int(part["center"][0]), int(part["center"][1])
-
-        # Base (Anchor)
-        cv2.circle(preview, (bx, by), 9, (0, 0, 255), -1)
-        # Tip
-        cv2.circle(preview, (tx, ty), 7, (0, 255, 0), -1)
-        # Center
-        cv2.circle(preview, (cx, cy), 5, (255, 0, 255), -1)
-        # Link
-        cv2.line(preview, (bx, by), (tx, ty), (255, 0, 0), 3)
-        # Label
-        cv2.putText(preview, f"PART {idx + 1}", (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(preview, f"PART {idx + 1}", (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
-    return preview
-
-
-# ============================================================
-# APPLICATION MAIN
-# ============================================================
-
-if "animation_results" not in st.session_state:
-    st.session_state.animation_results = {}
-
-uploaded_file = st.file_uploader("📁 Upload your hand-drawn character", type=["jpg", "jpeg", "png", "webp"])
+# --- Main UI ---
+uploaded_file = st.file_uploader("Upload hand-drawn character", type=["jpg", "jpeg", "png", "webp"])
 
 if uploaded_file is not None:
     try:
-        file_data = uploaded_file.getvalue()
-        image_array = np.frombuffer(file_data, dtype=np.uint8)
-        original_img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-        if original_img is None:
-            st.error("Could not read this image.")
+        if img is None:
+            st.error("Invalid image file.")
             st.stop()
 
-        original_img = resize_for_processing(original_img, max_dimension=1400)
+        # Resize if massive
+        h, w = img.shape[:2]
+        if max(h, w) > 1200:
+            scale = 1200.0 / max(h, w)
+            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
-        # Sidebar setup
-        st.sidebar.header("🎛️ Animation Controls")
-        detected_colors = extract_dominant_colors(original_img)
+        detected_colors = extract_dominant_colors(img)
 
+        st.sidebar.header("Controls")
+        chosen_colors = []
         if detected_colors:
-            st.sidebar.subheader("🎨 Detected Marking Colors")
-            color_
+            color_dict = {c["label"]: c for c in detected_colors}
+            selected_labels = st.sidebar.multiselect("Colors to Animate", list(color_dict.keys()), default=[list(color_dict.keys())[0]])
+            chosen_colors = [color_dict[lbl] for lbl in selected_labels]
+        else:
+            st.sidebar.info("No marker colors detected.")
+
+        motion = st.sidebar.selectbox("Motion Style", ["Sway", "Bounce", "Wave"])
+        intensity = float(st.sidebar.slider("Motion Strength", 4, 30, 12))
+
+        parts = detect_parts_safe(img, chosen_colors) if chosen_colors else []
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Original")
+            st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), use_container_width=True)
+
+        with col2:
+            st.subheader(f"Rigged Parts ({len(parts)} found)")
+            preview = img.copy()
+            for p in parts:
+                cv2.circle(preview, (int(p["base"][0]), int(p["base"][1])), 7, (0, 0, 255), -1)
+                cv2.circle(preview, (int(p["tip"][0]), int(p["tip"][1])), 5, (0, 255, 0), -1)
+                cv2.line(preview, (int(p["base"][0]), int(p["base"][1])), (int(p["tip"][0]), int(p["tip"][1])), (255, 0, 0), 2)
+            st.image(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB), use_container_width=True)
+
+        st.markdown("---")
+        if st.button("✨ Generate Animation", type="primary", use_container_width=True, disabled=len(parts) == 0):
+            with st.spinner("Rendering seamless animation..."):
+                frames = []
+                for i in range(16):
+                    warped = animate_frame_elastic(img, parts, motion, i, 16, intensity)
+                    frames.append(Image.fromarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)))
+
+                gif_data = build_gif(frames, duration=50)
+                st.subheader(f"Result: {motion}")
+                st.image(gif_data, use_container_width=True)
+                st.download_button("Download GIF", gif_data, f"{motion.lower()}_animation.gif", "image/gif")
+
+    except Exception as e:
+        st.error(f"Error: {e}")
