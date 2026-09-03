@@ -132,7 +132,7 @@ def detect_parts_safe(image, chosen_colors):
 
 
 # ============================================================
-# 10 ELASTIC MOTION GENERATORS (ZERO DETACHMENT)
+# 10 VECTORIZED ELASTIC MOTIONS (ZERO SCALAR ERRORS)
 # ============================================================
 
 def animate_frame_elastic(original, parts, motion_type, frame_index, total_frames, intensity):
@@ -144,8 +144,6 @@ def animate_frame_elastic(original, parts, motion_type, frame_index, total_frame
     phase = 2.0 * math.pi * float(frame_index) / float(total_frames)
     sine = math.sin(phase)
     cosine = math.cos(phase)
-    sine2 = math.sin(phase * 2.0)
-    sine3 = math.sin(phase * 3.0)
 
     for idx, part in enumerate(parts):
         mask = part["mask"]
@@ -196,14 +194,15 @@ def animate_frame_elastic(original, parts, motion_type, frame_index, total_frame
         elif motion_type == "Walk Cycle":
             step_phase = phase if idx % 2 == 0 else phase + math.pi
             dx = math.sin(step_phase) * intensity * weight
-            dy = max(0.0, -math.cos(step_phase)) * (intensity * 0.6) * weight
+            # Use np.maximum for elementwise array comparison
+            dy = np.maximum(0.0, -math.cos(step_phase)) * (intensity * 0.6) * weight
             map_x[mask] -= dx[mask]
             map_y[mask] -= dy[mask]
 
         # 7. Curved Smile / Arch
         elif motion_type == "Curved Smile":
             norm_x = (grid_x - cx) / max(10.0, length * 0.5)
-            dy = sine * (intensity * 0.6) * (norm_x ** 2) * weight
+            dy = sine * (intensity * 0.6) * np.square(norm_x) * weight
             map_y[mask] -= dy[mask]
 
         # 8. Curious Tilt
@@ -222,8 +221,9 @@ def animate_frame_elastic(original, parts, motion_type, frame_index, total_frame
 
         # 10. Wind Flutter
         elif motion_type == "Wind Flutter":
-            wave_travel = math.sin(phase * 2.0 - norm_dist * 4.0)
-            dx = wave_travel * (intensity * 0.9) * side * (norm_dist ** 1.2)
+            # Use np.sin for elementwise array calculations
+            wave_travel = np.sin(phase * 2.0 - norm_dist * 4.0)
+            dx = wave_travel * (intensity * 0.9) * side * np.power(norm_dist, 1.2)
             map_x[mask] -= dx[mask]
 
     warped = cv2.remap(original, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
