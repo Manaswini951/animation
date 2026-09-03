@@ -7,13 +7,13 @@ import streamlit as st
 from PIL import Image
 
 st.set_page_config(
-    page_title="Hand-Drawn Character Animator",
+    page_title="10-in-1 Character Animator",
     page_icon="🎨",
     layout="wide",
 )
 
-st.title("🎨 Hand-Drawn Character Animator")
-st.write("Upload a drawing to animate colored parts smoothly without detaching limbs.")
+st.title("🎨 10-in-1 Hand-Drawn Character Animator")
+st.write("Upload a drawing. Marked colored parts are automatically anchored to body lines to generate 10 unique motion styles without detaching.")
 
 
 def get_color_name(rgb):
@@ -122,6 +122,7 @@ def detect_parts_safe(image, chosen_colors):
             "mask": expanded > 0,
             "base": (base_x, base_y),
             "tip": (tip_x, tip_y),
+            "center": (float(np.mean(xs)), float(np.mean(ys))),
             "length": length,
             "area": area,
         })
@@ -130,7 +131,11 @@ def detect_parts_safe(image, chosen_colors):
     return parts
 
 
-def animate_frame_elastic(original, parts, motion, frame_index, total_frames, intensity):
+# ============================================================
+# 10 ELASTIC MOTION GENERATORS (ZERO DETACHMENT)
+# ============================================================
+
+def animate_frame_elastic(original, parts, motion_type, frame_index, total_frames, intensity):
     h, w = original.shape[:2]
     grid_x, grid_y = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
     map_x = grid_x.copy()
@@ -138,27 +143,88 @@ def animate_frame_elastic(original, parts, motion, frame_index, total_frames, in
 
     phase = 2.0 * math.pi * float(frame_index) / float(total_frames)
     sine = math.sin(phase)
+    cosine = math.cos(phase)
+    sine2 = math.sin(phase * 2.0)
+    sine3 = math.sin(phase * 3.0)
 
     for idx, part in enumerate(parts):
         mask = part["mask"]
         bx, by = part["base"]
+        cx, cy = part["center"]
         length = part["length"]
 
+        # Base is pinned at 0 weight, tip reaches 1.0 weight
         dist = np.sqrt((grid_x - bx) ** 2 + (grid_y - by) ** 2)
-        weight = np.power(np.clip(dist / length, 0.0, 1.0), 1.5)
-        dir_mult = 1.0 if idx % 2 == 0 else -1.0
+        norm_dist = np.clip(dist / length, 0.0, 1.0)
+        weight = np.power(norm_dist, 1.5)
+        side = 1.0 if idx % 2 == 0 else -1.0
 
-        if motion == "Sway":
-            dx = sine * intensity * dir_mult * weight
+        # 1. Natural Sway
+        if motion_type == "Natural Sway":
+            dx = sine * intensity * side * weight
             map_x[mask] -= dx[mask]
-        elif motion == "Bounce":
-            dy = sine * (intensity * 0.7) * weight
-            map_y[mask] -= dy[mask]
-        elif motion == "Wave":
-            dx = sine * (intensity * 1.4) * dir_mult * weight
-            dy = (1.0 - abs(sine)) * (intensity * 0.4) * weight
+
+        # 2. Playful Bounce (Squash & Stretch)
+        elif motion_type == "Playful Bounce":
+            dy = sine * (intensity * 0.8) * weight
+            dx = -sine * (intensity * 0.25) * side * weight
             map_x[mask] -= dx[mask]
             map_y[mask] -= dy[mask]
+
+        # 3. Dynamic Wave
+        elif motion_type == "Dynamic Wave":
+            dx = sine * (intensity * 1.4) * side * weight
+            dy = (1.0 - abs(sine)) * (intensity * 0.5) * weight
+            map_x[mask] -= dx[mask]
+            map_y[mask] -= dy[mask]
+
+        # 4. Rapid Twitch
+        elif motion_type == "Rapid Twitch":
+            snappy_sine = math.sin(phase * 3.0)
+            dx = snappy_sine * (intensity * 0.6) * side * (weight ** 2)
+            map_x[mask] -= dx[mask]
+
+        # 5. Breathing Pulse
+        elif motion_type == "Breathing Pulse":
+            scale_delta = sine * (intensity / 100.0) * 0.6
+            dx = (grid_x - cx) * scale_delta * weight
+            dy = (grid_y - cy) * scale_delta * weight
+            map_x[mask] -= dx[mask]
+            map_y[mask] -= dy[mask]
+
+        # 6. Walk Cycle
+        elif motion_type == "Walk Cycle":
+            step_phase = phase if idx % 2 == 0 else phase + math.pi
+            dx = math.sin(step_phase) * intensity * weight
+            dy = max(0.0, -math.cos(step_phase)) * (intensity * 0.6) * weight
+            map_x[mask] -= dx[mask]
+            map_y[mask] -= dy[mask]
+
+        # 7. Curved Smile / Arch
+        elif motion_type == "Curved Smile":
+            norm_x = (grid_x - cx) / max(10.0, length * 0.5)
+            dy = sine * (intensity * 0.6) * (norm_x ** 2) * weight
+            map_y[mask] -= dy[mask]
+
+        # 8. Curious Tilt
+        elif motion_type == "Curious Tilt":
+            dx = sine * (intensity * 0.8) * weight
+            dy = cosine * (intensity * 0.4) * weight
+            map_x[mask] -= dx[mask]
+            map_y[mask] -= dy[mask]
+
+        # 9. Jitter / Shiver
+        elif motion_type == "Jitter / Shiver":
+            jitter_x = math.sin(phase * 5.0) * (intensity * 0.35) * weight
+            jitter_y = math.cos(phase * 4.0) * (intensity * 0.25) * weight
+            map_x[mask] -= jitter_x[mask]
+            map_y[mask] -= jitter_y[mask]
+
+        # 10. Wind Flutter
+        elif motion_type == "Wind Flutter":
+            wave_travel = math.sin(phase * 2.0 - norm_dist * 4.0)
+            dx = wave_travel * (intensity * 0.9) * side * (norm_dist ** 1.2)
+            map_x[mask] -= dx[mask]
 
     warped = cv2.remap(original, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
     return warped
@@ -170,6 +236,23 @@ def build_gif(frames, duration=50):
     prepared[0].save(buf, format="GIF", save_all=True, append_images=prepared[1:], duration=duration, loop=0)
     return buf.getvalue()
 
+
+ALL_MOTIONS = [
+    "Natural Sway",
+    "Playful Bounce",
+    "Dynamic Wave",
+    "Rapid Twitch",
+    "Breathing Pulse",
+    "Walk Cycle",
+    "Curved Smile",
+    "Curious Tilt",
+    "Jitter / Shiver",
+    "Wind Flutter",
+]
+
+# ============================================================
+# MAIN UI
+# ============================================================
 
 uploaded_file = st.file_uploader("Upload hand-drawn character", type=["jpg", "jpeg", "png", "webp"])
 
@@ -202,7 +285,6 @@ if uploaded_file is not None:
         else:
             st.sidebar.info("No distinct marker colors detected.")
 
-        motion = st.sidebar.selectbox("Motion Style", ["Sway", "Bounce", "Wave"])
         intensity = float(st.sidebar.slider("Motion Strength", 4, 30, 12))
 
         parts = detect_parts_safe(img, chosen_colors) if chosen_colors else []
@@ -223,28 +305,76 @@ if uploaded_file is not None:
             st.image(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB))
 
         st.markdown("---")
-        if st.button("✨ Generate Animation", type="primary", disabled=(len(parts) == 0)):
-            with st.spinner("Rendering seamless animation..."):
+
+        btn_col1, btn_col2 = st.columns([1, 1])
+        with btn_col1:
+            generate_all = st.button("✨ Generate All 10 Animations", type="primary", disabled=(len(parts) == 0))
+        with btn_col2:
+            single_motion = st.selectbox("Or choose a single style to render:", ALL_MOTIONS)
+            generate_single = st.button(f"Render Only '{single_motion}'", disabled=(len(parts) == 0))
+
+        # RENDER ALL 10
+        if generate_all:
+            progress = st.progress(0, text="Calculating deformations across all 10 animation styles...")
+            results = []
+
+            for idx, motion_name in enumerate(ALL_MOTIONS):
                 frames = []
                 for i in range(16):
-                    warped = animate_frame_elastic(img, parts, motion, i, 16, intensity)
+                    warped = animate_frame_elastic(img, parts, motion_name, i, 16, intensity)
                     rgb_frame = np.ascontiguousarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
                     frames.append(Image.fromarray(rgb_frame))
+                gif_bytes = build_gif(frames, duration=50)
+                results.append((motion_name, gif_bytes))
+                progress.progress((idx + 1) / len(ALL_MOTIONS))
 
-                gif_data = build_gif(frames, duration=50)
+            progress.empty()
+            st.success("All 10 animations generated successfully!")
 
-                st.subheader(f"Result: {motion}")
-                b64_gif = base64.b64encode(gif_data).decode("utf-8")
-                st.markdown(
-                    f'<img src="data:image/gif;base64,{b64_gif}" style="max-width: 100%; height: auto; border-radius: 8px;">',
-                    unsafe_allow_html=True,
-                )
-                st.download_button(
-                    "Download GIF",
-                    data=gif_data,
-                    file_name=f"{motion.lower()}_animation.gif",
-                    mime="image/gif"
-                )
+            # 3-wide responsive grid layout
+            for row_start in range(0, len(results), 3):
+                row_cols = st.columns(3)
+                for col_idx in range(3):
+                    item_idx = row_start + col_idx
+                    if item_idx < len(results):
+                        name, data = results[item_idx]
+                        with row_cols[col_idx]:
+                            st.markdown(f"#### {item_idx + 1}. {name}")
+                            b64 = base64.b64encode(data).decode("utf-8")
+                            st.markdown(
+                                f'<img src="data:image/gif;base64,{b64}" style="width: 100%; border-radius: 8px; margin-bottom: 8px;">',
+                                unsafe_allow_html=True,
+                            )
+                            st.download_button(
+                                f"Download {name}",
+                                data=data,
+                                file_name=f"{name.lower().replace(' ', '_')}.gif",
+                                mime="image/gif",
+                                key=f"dl_{item_idx}",
+                            )
+
+        # RENDER SINGLE
+        elif generate_single:
+            with st.spinner(f"Rendering {single_motion}..."):
+                frames = []
+                for i in range(16):
+                    warped = animate_frame_elastic(img, parts, single_motion, i, 16, intensity)
+                    rgb_frame = np.ascontiguousarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
+                    frames.append(Image.fromarray(rgb_frame))
+                gif_bytes = build_gif(frames, duration=50)
+
+            st.subheader(f"Result: {single_motion}")
+            b64 = base64.b64encode(gif_bytes).decode("utf-8")
+            st.markdown(
+                f'<img src="data:image/gif;base64,{b64}" style="max-width: 600px; border-radius: 8px; margin-bottom: 8px;">',
+                unsafe_allow_html=True,
+            )
+            st.download_button(
+                f"Download {single_motion} GIF",
+                data=gif_bytes,
+                file_name=f"{single_motion.lower().replace(' ', '_')}.gif",
+                mime="image/gif",
+            )
 
     except Exception as e:
         st.error(f"Error: {e}")
