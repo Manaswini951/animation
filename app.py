@@ -109,7 +109,6 @@ def detect_parts_safe(image, chosen_colors):
         if len(xs) < 15:
             continue
 
-        # Safe Joint Detection using Min/Max Bounds
         base_y = float(np.max(ys))
         base_x = float(np.mean(xs[ys == int(base_y)]))
 
@@ -123,7 +122,6 @@ def detect_parts_safe(image, chosen_colors):
             "mask": expanded > 0,
             "base": (base_x, base_y),
             "tip": (tip_x, tip_y),
-            "center": (float(np.mean(xs)), float(np.mean(ys))),
             "length": length,
             "area": int(area),
         })
@@ -165,14 +163,14 @@ def animate_frame_elastic(original, parts, motion, frame_index, total_frames, in
     return cv2.remap(original, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
 
 
-def build_gif(frames, duration=60):
+def build_gif(frames, duration=50):
     buf = io.BytesIO()
     prepared = [f.convert("P", palette=Image.ADAPTIVE) for f in frames]
     prepared[0].save(buf, format="GIF", save_all=True, append_images=prepared[1:], duration=duration, loop=0)
     return buf.getvalue()
 
 
-# --- Main UI ---
+# Main Application Loop
 uploaded_file = st.file_uploader("Upload hand-drawn character", type=["jpg", "jpeg", "png", "webp"])
 
 if uploaded_file is not None:
@@ -181,10 +179,9 @@ if uploaded_file is not None:
         img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
         if img is None:
-            st.error("Invalid image file.")
+            st.error("Invalid image format.")
             st.stop()
 
-        # Resize if massive
         h, w = img.shape[:2]
         if max(h, w) > 1200:
             scale = 1200.0 / max(h, w)
@@ -199,7 +196,7 @@ if uploaded_file is not None:
             selected_labels = st.sidebar.multiselect("Colors to Animate", list(color_dict.keys()), default=[list(color_dict.keys())[0]])
             chosen_colors = [color_dict[lbl] for lbl in selected_labels]
         else:
-            st.sidebar.info("No marker colors detected.")
+            st.sidebar.info("No distinct marker colors detected.")
 
         motion = st.sidebar.selectbox("Motion Style", ["Sway", "Bounce", "Wave"])
         intensity = float(st.sidebar.slider("Motion Strength", 4, 30, 12))
@@ -209,7 +206,7 @@ if uploaded_file is not None:
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Original")
-            st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), use_container_width=True)
+            st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
         with col2:
             st.subheader(f"Rigged Parts ({len(parts)} found)")
@@ -218,10 +215,10 @@ if uploaded_file is not None:
                 cv2.circle(preview, (int(p["base"][0]), int(p["base"][1])), 7, (0, 0, 255), -1)
                 cv2.circle(preview, (int(p["tip"][0]), int(p["tip"][1])), 5, (0, 255, 0), -1)
                 cv2.line(preview, (int(p["base"][0]), int(p["base"][1])), (int(p["tip"][0]), int(p["tip"][1])), (255, 0, 0), 2)
-            st.image(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB), use_container_width=True)
+            st.image(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB))
 
         st.markdown("---")
-        if st.button("✨ Generate Animation", type="primary", use_container_width=True, disabled=len(parts) == 0):
+        if st.button("✨ Generate Animation", type="primary", disabled=len(parts) == 0):
             with st.spinner("Rendering seamless animation..."):
                 frames = []
                 for i in range(16):
@@ -230,7 +227,7 @@ if uploaded_file is not None:
 
                 gif_data = build_gif(frames, duration=50)
                 st.subheader(f"Result: {motion}")
-                st.image(gif_data, use_container_width=True)
+                st.image(gif_data)
                 st.download_button("Download GIF", gif_data, f"{motion.lower()}_animation.gif", "image/gif")
 
     except Exception as e:
