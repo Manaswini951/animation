@@ -4,8 +4,8 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 
-st.set_page_config(page_title="Auto Pink-Part Animator", layout="wide")
-st.title("Auto Color-Targeted 2D Animator (No AI)")
+st.set_page_config(page_title="Attached 2D Limb Animator", layout="wide")
+st.title("Seamless 2D Limb & Ear Animator (No Detaching / No AI)")
 
 uploaded_file = st.file_uploader(
     "Upload your hand-drawn character", type=["jpg", "jpeg", "png"]
@@ -17,143 +17,175 @@ if uploaded_file is not None:
     img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
     h, w = img.shape[:2]
 
-    # Sidebar: Fine-tune the pink range if needed
-    st.sidebar.header("Color Sensitivity (Dark Pink/Magenta)")
+    # Sidebar: Color Detection & Elasticity Settings
+    st.sidebar.header("1. Dark Pink Detection")
     h_min = st.sidebar.slider("Hue Min", 0, 180, 135)
     h_max = st.sidebar.slider("Hue Max", 0, 180, 175)
     s_min = st.sidebar.slider("Saturation Min", 0, 255, 60)
     v_min = st.sidebar.slider("Value/Brightness Min", 0, 255, 60)
 
-    st.sidebar.header("Animation Settings")
-    swing_angle = float(st.sidebar.slider("Swing Angle (degrees)", 2, 35, 12))
-    speed_duration = int(st.sidebar.slider("Frame Duration (ms)", 20, 120, 50))
+    st.sidebar.header("2. Animation Physics")
+    motion_type = st.sidebar.selectbox(
+        "Movement Style",
+        [
+            "Ear / Limb Twitch (Anchored Base)",
+            "Smile / Muzzle Stretch",
+            "Breathing / Body Pulse (Root Anchored)",
+        ],
+    )
+    elastic_stretch = float(st.sidebar.slider("Wiggle Reach (Pixels)", 3.0, 35.0, 12.0))
+    stiffness = float(st.sidebar.slider("Joint Rigidity / Falloff", 1.0, 3.0, 1.6))
+    frame_speed = int(st.sidebar.slider("Frame Delay (ms)", 20, 120, 45))
 
-    # 2. Convert to HSV & Create Mask for Dark Pink/Magenta
+    # 2. Extract Marked Color (HSV)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     lower_pink = np.array([h_min, s_min, v_min])
     upper_pink = np.array([h_max, 255, 255])
     raw_mask = cv2.inRange(hsv, lower_pink, upper_pink)
 
-    # Clean noise and bridge marker stroke gaps
+    # Clean gaps and noise
     kernel = np.ones((5, 5), np.uint8)
     clean_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_CLOSE, kernel)
 
-    # 3. Find distinct parts (Left ear, Right ear, etc.)
+    # 3. Detect Connected Components (Ears/Limbs)
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
         clean_mask, connectivity=8
     )
 
-    # Filter out tiny noise specks (require at least 150 pixels)
-    valid_parts = []
+    parts_meta = []
     for i in range(1, num_labels):
         if stats[i, cv2.CC_STAT_AREA] >= 150:
-            part_mask = (labels == i).astype(np.uint8) * 255
-            # Joint Pivot = lowest point (base of the ear)
+            part_mask = (labels == i).astype(np.uint8)
             y_pts, x_pts = np.where(part_mask > 0)
-            pivot_y = float(np.max(y_pts))
-            pivot_x = float(np.mean(x_pts[y_pts == int(pivot_y)]))
-            valid_parts.append({
+
+            # Base anchor (pinned to head/body - lowest point)
+            base_y = float(np.max(y_pts))
+            base_x = float(np.mean(x_pts[y_pts == int(base_y)]))
+
+            # Free tip (moves the most - highest point)
+            tip_y = float(np.min(y_pts))
+            tip_x = float(np.mean(x_pts[y_pts == int(tip_y)]))
+
+            height_span = max(1.0, base_y - tip_y)
+
+            parts_meta.append({
                 "mask": part_mask,
-                "pivot": (pivot_x, pivot_y)
+                "base": (base_x, base_y),
+                "tip": (tip_x, tip_y),
+                "span": height_span,
             })
 
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("Auto-Detected Pink Zones")
-        preview_mask = cv2.cvtColor(clean_mask, cv2.COLOR_GRAY2RGB)
-        # Draw green circles on detected pivot joints
-        for part in valid_parts:
+        st.subheader("Anchor Point Preview")
+        preview = img.copy()
+        for p in parts_meta:
+            # Red dot = Fixed Anchor to body (0% motion)
             cv2.circle(
-                preview_mask,
-                (int(part["pivot"][0]), int(part["pivot"][1])),
-                7,
-                (0, 255, 0),
+                preview,
+                (int(p["base"][0]), int(p["base"][1])),
+                6,
+                (0, 0, 255),
                 -1,
             )
+            # Blue dot = Tip (100% motion)
+            cv2.circle(
+                preview,
+                (int(p["tip"][0]), int(p["tip"][1])),
+                5,
+                (255, 0, 0),
+                -1,
+            )
+            # Connecting line indicating tension vector
+            cv2.line(
+                preview,
+                (int(p["base"][0]), int(p["base"][1])),
+                (int(p["tip"][0]), int(p["tip"][1])),
+                (0, 255, 0),
+                2,
+            )
+
         st.image(
-            preview_mask,
-            caption=f"Detected {len(valid_parts)} pink limb(s). Green dots = pivot joints.",
+            cv2.cvtColor(preview, cv2.COLOR_BGR2RGB),
+            caption="Red Dot = Body Connection (Stationary) | Blue Dot = Moving Tip",
             use_container_width=True,
         )
 
     with col2:
-        st.subheader("Animated Output")
-        if len(valid_parts) == 0:
-            st.warning("No dark pink regions detected. Try adjusting the Hue/Saturation sliders.")
+        st.subheader("Seamless Animation")
+        if len(parts_meta) == 0:
+            st.warning("No marked color zones found. Adjust Hue/Saturation sliders.")
         else:
-            if st.button("Generate Animation", type="primary"):
-                with st.spinner("Isolating parts and rendering frames..."):
-                    # Extract each part as an independent RGBA layer
-                    b, g, r = cv2.split(img)
-                    part_layers = []
-                    total_mask = np.zeros((h, w), dtype=np.uint8)
+            if st.button("Generate Seamless Motion", type="primary"):
+                with st.spinner("Calculating elastic mesh deformations..."):
+                    # Pre-calculate base pixel coordinates
+                    grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
+                    grid_x = grid_x.astype(np.float32)
+                    grid_y = grid_y.astype(np.float32)
 
-                    for part in valid_parts:
-                        p_mask = part["mask"]
-                        total_mask = cv2.bitwise_or(total_mask, p_mask)
-                        p_rgba = cv2.merge([b, g, r, p_mask])
-                        part_layers.append({
-                            "rgba": p_rgba,
-                            "pivot": part["pivot"]
-                        })
-
-                    # Inpaint the base image so background stays clean behind moving parts
-                    clean_base = cv2.inpaint(
-                        img, total_mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA
-                    )
-
-                    # Build animation sequence
                     frames = []
-                    angle_steps = np.sin(np.linspace(0, 2 * np.pi, 20))
+                    steps = np.sin(np.linspace(0, 2 * np.pi, 24))
 
-                    for step in angle_steps:
-                        frame = clean_base.copy()
+                    for step in steps:
+                        # Copy coordinate maps
+                        map_x = grid_x.copy()
+                        map_y = grid_y.copy()
 
-                        # Animate all parts
-                        for idx, part in enumerate(part_layers):
-                            # Alternate swing direction for symmetric ear twitching
-                            direction = 1.0 if idx % 2 == 0 else -1.0
-                            current_angle = float(step * swing_angle * direction)
+                        for idx, p in enumerate(parts_meta):
+                            p_mask = p["mask"] == 1
+                            base_x, base_y = p["base"]
+                            span = p["span"]
 
-                            rot_mat = cv2.getRotationMatrix2D(
-                                part["pivot"], current_angle, 1.0
-                            )
-                            rotated = cv2.warpAffine(
-                                part["rgba"],
-                                rot_mat,
-                                (w, h),
-                                flags=cv2.INTER_LINEAR,
-                                borderMode=cv2.BORDER_CONSTANT,
-                            )
+                            # Weight = 0 at base (pinned), weight = 1 at tip
+                            # Clamped between 0 and 1
+                            vert_dist = np.clip((base_y - grid_y) / span, 0.0, 1.0)
+                            weight = np.power(vert_dist, stiffness)
 
-                            # Blend onto frame
-                            alpha = rotated[:, :, 3] / 255.0
-                            for c in range(3):
-                                frame[:, :, c] = (
-                                    (1.0 - alpha) * frame[:, :, c]
-                                    + alpha * rotated[:, :, c]
-                                )
+                            # Direction alternates for left vs right ears
+                            side_multiplier = 1.0 if idx % 2 == 0 else -1.0
 
-                        frames.append(
-                            Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                            if "Twitch" in motion_type:
+                                # Smooth horizontal sway, pinned at base
+                                dx = step * elastic_stretch * side_multiplier * weight
+                                map_x[p_mask] -= dx[p_mask]
+
+                            elif "Smile" in motion_type:
+                                # Quadratic parabolic arching
+                                dx_center = (grid_x - base_x) / 40.0
+                                dy = step * elastic_stretch * (dx_center ** 2) * weight
+                                map_y[p_mask] -= dy[p_mask]
+
+                            elif "Pulse" in motion_type:
+                                # Vertical squash & stretch anchored to root
+                                dy = step * elastic_stretch * weight
+                                map_y[p_mask] -= dy[p_mask]
+
+                        # Warp entire image smoothly without separating seams
+                        deformed_frame = cv2.remap(
+                            img,
+                            map_x,
+                            map_y,
+                            interpolation=cv2.INTER_LINEAR,
+                            borderMode=cv2.BORDER_REFLECT,
                         )
 
-                    # Save as GIF
-                    gif_buffer = io.BytesIO()
+                        frames.append(
+                            Image.fromarray(cv2.cvtColor(deformed_frame, cv2.COLOR_BGR2RGB))
+                        )
+
+                    # Export GIF
+                    buf = io.BytesIO()
                     frames[0].save(
-                        gif_buffer,
+                        buf,
                         format="GIF",
                         save_all=True,
                         append_images=frames[1:],
-                        duration=speed_duration,
+                        duration=frame_speed,
                         loop=0,
                     )
-                    gif_bytes = gif_buffer.getvalue()
+                    gif_data = buf.getvalue()
 
-                    st.image(gif_bytes, caption="Wiggling Pink Parts")
+                    st.image(gif_data, caption="Seamlessly Anchored Animation")
                     st.download_button(
-                        label="Download GIF",
-                        data=gif_bytes,
-                        file_name="animated_ears.gif",
-                        mime="image/gif",
+                        "Download GIF", gif_data, "seamless_animation.gif", "image/gif"
                     )
