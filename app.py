@@ -234,7 +234,6 @@ if uploaded_file is not None:
                 gif_data = build_gif(frames, duration=50)
 
                 st.subheader(f"Result: {motion}")
-                # Safe HTML preview to avoid internal serialization errors
                 b64_gif = base64.b64encode(gif_data).decode("utf-8")
                 st.markdown(
                     f'<img src="data:image/gif;base64,{b64_gif}" style="max-width: 100%; height: auto; border-radius: 8px;">',
